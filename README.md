@@ -5,7 +5,7 @@
 | 系列 | 定位 | 主语言 |
 |---|---|---|
 | [LangChain & LangGraph 从入门到进阶](./LangChain-LangGraph入门到进阶/README.md) | 框架用法：从零基础到 RAG、Agent、多 Agent 与部署 | Python |
-| [企业级 AI 应用开发实战](./企业级AI应用开发实战/README.md) | 企业工程与平台：AI SDK、MCP、Agent 工程化、企业 RAG、LLMOps、安全与实战项目 | TypeScript |
+| [企业级 AI 应用开发实战](./企业级AI应用开发实战/README.md) | 跨生态全景与企业工程：协议标准（MCP / A2A / AG-UI）、模型层、Agent 工程化、企业 RAG、LLMOps、安全与实战项目 | 多语言（Python / TS / Java / Go） |
 
 资料：
 

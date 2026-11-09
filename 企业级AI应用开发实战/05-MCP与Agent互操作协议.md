@@ -1,8 +1,8 @@
-# 03 MCP 协议与企业工具集成
+# 05 MCP 与 Agent 互操作协议
 
-> 本章目标：理解 MCP 的协议模型和 `2026-07-28` 无状态新规范，能用 TS SDK v2 写出**企业可用**的 MCP Server，并掌握鉴权、网关化与安全防护。
+> 本章目标：理解 MCP 的协议模型和 `2026-07-28` 无状态新规范，能用任一主流语言写出**企业可用**的 MCP Server，掌握鉴权、网关化与安全防护；并理解 **A2A** 如何让不同团队、不同框架、不同语言的 Agent 协作。
 >
-> 版本基线：MCP 规范 `2026-07-28`；TS SDK v2（`@modelcontextprotocol/server` / `@modelcontextprotocol/client`，2026-07-27 发布，v1 `@modelcontextprotocol/sdk` 仍维护至少 6 个月）。
+> 版本基线：MCP 规范 `2026-07-28`；官方 SDK——Python `mcp` v2（2026-07-28 发布）、TS `@modelcontextprotocol/server` v2（2026-07-27 发布）、Java（Spring AI 2.0 集成）、Go、C#；A2A v1.0。MCP 与 A2A 均由 Linux 基金会旗下的 AAIF 托管。
 
 ---
 
@@ -55,7 +55,7 @@ graph LR
 | Roots（告知 Server 可访问的目录） | **Deprecated** | 用工具参数、资源 URI 或服务端配置 |
 | Logging | **Deprecated** | 用 `stderr` 或 OpenTelemetry |
 | Tasks（异步长任务） | 移为官方**扩展** `io.modelcontextprotocol/tasks` | 返回 task handle，`tasks/get` 轮询 |
-| MCP Apps（工具自带 UI） | 扩展 | 见 [02 章第八节](./02-AI-SDK与AI前端工程.md#八generative-ui-与-mcp-apps) |
+| MCP Apps（工具自带 UI） | 扩展 | 见 [04 章第七节](./04-AI交互层-流式协议与生成式UI.md#七生成式-ui) |
 
 ---
 
@@ -111,9 +111,59 @@ graph LR
 
 ---
 
-## 五、用 TS SDK v2 写一个 MCP Server
+## 五、写一个 MCP Server（多语言）
 
-### 5.1 最小示例（stdio）
+官方 SDK 覆盖 Python、TypeScript、Java、Go、C# 等语言，概念完全一致：**创建 Server → 注册工具（名称、描述、输入 / 输出 schema、处理函数）→ 选择传输方式运行**。下面给出三种生态的写法。
+
+### 5.1 Python（官方 SDK v2）
+
+```python
+from typing import Literal
+from pydantic import BaseModel
+from mcp.server import MCPServer   # v2：原 FastMCP 已更名为 MCPServer
+
+mcp = MCPServer("ticket-server")
+
+class Ticket(BaseModel):
+    id: str
+    title: str
+    status: str
+
+class SearchResult(BaseModel):
+    tickets: list[Ticket]
+    total: int
+
+@mcp.tool()   # v2 要求带括号
+async def search_tickets(keyword: str,
+                         status: Literal["open", "in_progress", "closed"] | None = None) -> SearchResult:
+    """按关键词和状态搜索工单。返回最多 20 条，按更新时间倒序。"""
+    items, total = await ticket_api.search(keyword=keyword, status=status, limit=20)
+    return SearchResult(tickets=[Ticket(id=i.id, title=i.title, status=i.status) for i in items], total=total)
+
+if __name__ == "__main__":
+    mcp.run()  # 默认 stdio；远程部署时在 run() 中指定 Streamable HTTP 传输及 host / port
+```
+
+> 📖 Python SDK 根据**类型注解**自动生成输入 / 输出 schema，**docstring 即工具描述**。v1 写法 `from mcp.server.fastmcp import FastMCP` 在 v2 中已移除；社区独立项目 `fastmcp`（`pip install fastmcp`）仍在维护，是另一个包，不要混淆。迁移细节见官方迁移指南。
+
+### 5.2 Java（Spring AI 2.0 注解）
+
+```java
+@Service
+public class TicketTools {
+
+    @McpTool(name = "search_tickets", description = "按关键词和状态搜索工单。返回最多 20 条，按更新时间倒序。")
+    public SearchResult searchTickets(
+            @McpToolParam(description = "标题或描述中的关键词") String keyword,
+            @McpToolParam(description = "工单状态：open / in_progress / closed", required = false) String status) {
+        return ticketService.search(keyword, status, 20);
+    }
+}
+```
+
+> ⚠️ **注意**：Spring AI 2.0 要求 Spring Boot 4.1；仍在 Boot 3.x 的项目使用 Spring AI 1.1.x 或 Spring AI Alibaba 1.1.x。各 SDK 对 `2026-07-28` 新规范的支持进度不一，上线前确认所用 SDK 版本支持的协议版本。
+
+### 5.3 TypeScript（官方 SDK v2）
 
 ```ts
 import { McpServer } from '@modelcontextprotocol/server';
@@ -150,20 +200,22 @@ server.registerTool(
 await server.connect(new StdioServerTransport());
 ```
 
-### 5.2 远程部署（Streamable HTTP）
+### 5.4 远程部署（Streamable HTTP）
 
-v2 把 HTTP 适配拆成独立包：`@modelcontextprotocol/node`（Node 原生）、`@modelcontextprotocol/express`、`@modelcontextprotocol/fastify`、`@modelcontextprotocol/hono`。结构一般是：
+无论哪种语言，远程部署的分层结构都一样：
 
 ```text
-HTTP 框架（Hono / Express）
+HTTP 框架（FastAPI / Starlette、Spring WebMVC / WebFlux、Hono / Express …）
   └─ 鉴权中间件：校验 Bearer Token（见第七节）
-      └─ MCP 适配器：把请求交给 McpServer
+      └─ MCP 适配器：把请求交给 MCP Server
           └─ 工具 handler：拿到经过校验的用户身份，调用下游业务 API
 ```
 
-> ⚠️ **注意**：各适配器的具体 API 请看 SDK 仓库 `examples/` 目录与 v2 文档。HTTP 部署必须校验 `Origin` 头（非法来源返回 403），防止浏览器侧的 DNS rebinding 攻击。
+各 SDK 的适配方式：Python SDK 内置 Streamable HTTP（可挂载到 ASGI 应用）；TS SDK v2 拆分出 `@modelcontextprotocol/node`、`express`、`fastify`、`hono` 适配包；Spring AI 提供 WebMVC / WebFlux 传输。
 
-### 5.3 工具设计原则（重点）
+> ⚠️ **注意**：具体 API 以各 SDK 的 `examples/` 与文档为准。HTTP 部署必须校验 `Origin` 头（非法来源返回 403），防止浏览器侧的 DNS rebinding 攻击。新规范无会话，**任何副本都能处理任何请求**，可直接放在普通负载均衡之后。
+
+### 5.5 工具设计原则（重点）
 
 工具设计的质量，比框架选择更能决定 Agent 的效果。
 
@@ -185,7 +237,18 @@ HTTP 框架（Hono / Express）
 
 ## 六、在自己的 Agent 中消费 MCP
 
-用 AI SDK 的 MCP 客户端，把远程 MCP Server 的工具接给模型：
+主流框架都内置了 MCP 客户端，把 MCP Server 的工具转换为框架自己的工具对象：
+
+| 框架 | 接入方式 |
+|---|---|
+| LangChain / LangGraph | `langchain-mcp-adapters` |
+| OpenAI Agents SDK | 内置 MCP Server 配置 |
+| Google ADK | `McpToolset` |
+| Microsoft Agent Framework | 内置 MCP 工具支持 |
+| Spring AI | MCP Client Starter，工具自动注册为 `ToolCallback` |
+| Vercel AI SDK | `@ai-sdk/mcp` |
+
+以 AI SDK 为例：
 
 ```ts
 import { createMCPClient } from '@ai-sdk/mcp';
@@ -214,7 +277,9 @@ try {
 }
 ```
 
-> ⚠️ **注意**：AI SDK 中 MCP 客户端的入口在各版本间有过调整（早期为 `experimental_createMCPClient`），以安装版本为准。
+> ⚠️ **注意**：
+> - 各框架 MCP 客户端的入口在版本间有过调整（如 AI SDK 早期为 `experimental_createMCPClient`），以安装版本为准
+> - 连接远程 MCP Server 时，传递的应是**当前用户自己的令牌**，而不是一个高权限服务账号（第七节）
 
 ---
 
@@ -307,11 +372,83 @@ graph LR
 
 > ⚠️ **注意**：牢记 **"致命三要素"（Lethal Trifecta）**：当一个 Agent 同时具备 ① 访问私有数据 ② 接触不可信内容 ③ 对外通信能力时，提示注入就能导致数据外泄。设计工具组合时至少切断其中一环，例如能读内部文档的 Agent，不给它任意发 HTTP 请求或发邮件的能力。
 
-更系统的安全设计见 [08 章](./08-安全权限与上线清单.md)。
+更系统的安全设计见 [10 章](./10-安全权限与上线清单.md)。
 
 ---
 
-## 十、MCP 与相关概念的边界
+## 十、A2A：Agent 之间的协作协议（重点）
+
+### 10.1 为什么需要 A2A
+
+MCP 解决"Agent 调用工具"，但企业里会出现另一类需求：
+
+- 财务团队用 Java 做了一个"报销审核 Agent"，HR 团队用 Python 做了一个"入职助手 Agent"，入职助手需要请报销 Agent 帮忙处理一笔费用
+- 采购 Agent 需要与**供应商公司**的销售 Agent 谈价
+
+这些协作对象不是"工具"，而是**有自主性、会多轮交互、执行时间可能很长**的 Agent，而且由不同团队、不同框架、不同语言实现，内部细节互不可见。A2A 就是为这种场景设计的。
+
+### 10.2 MCP 与 A2A 的分工
+
+| | MCP | A2A |
+|---|---|---|
+| 连接对象 | Agent ↔ 工具 / 数据 | Agent ↔ Agent |
+| 对方的性质 | 函数式、确定性、无自主性 | 自主、不透明、可多轮、可长时间运行 |
+| 交互形态 | 一次调用一次结果 | 任务（Task）有生命周期，可追问、可流式、可异步通知 |
+| 典型场景 | 查数据库、调业务 API | 跨团队 / 跨组织的 Agent 委托与协作 |
+
+> 🎯 **落地要点**：判断标准很简单——**对方是一个函数，用 MCP；对方是一个"同事"，用 A2A**。很多时候把一个 Agent 包装成 MCP 工具也能工作，但会丢失多轮交互、长任务状态和身份边界。
+
+### 10.3 核心概念
+
+```mermaid
+sequenceDiagram
+    participant C as 客户端 Agent
+    participant R as 远程 Agent
+    C->>R: GET /.well-known/agent-card.json
+    R-->>C: Agent Card（能力、技能、端点、鉴权方式）
+    C->>R: 发送消息（创建 Task）
+    R-->>C: Task 状态：working（可流式推送进度）
+    R-->>C: Task 状态：input-required（需要补充信息）
+    C->>R: 补充消息
+    R-->>C: Task 状态：completed + Artifact（产出物）
+```
+
+| 概念 | 含义 |
+|---|---|
+| **Agent Card** | Agent 的"名片"：名称、描述、技能列表、服务端点、支持的能力、鉴权要求；v1.0 支持**签名 Agent Card**，用于验证身份 |
+| **Task** | 一次委托的工作单元，有状态：`submitted` → `working` → `input-required` / `completed` / `failed` / `canceled` 等 |
+| **Message / Part** | 双方交换的消息，由文本、文件、结构化数据等 Part 组成 |
+| **Artifact** | 任务的产出物（报告、文件、结构化结果） |
+| **流式与推送** | 短任务用 SSE 流式更新；长任务用推送通知（Webhook）回调 |
+| **传输绑定** | v1.0 支持 JSON-RPC 2.0 over HTTPS、gRPC、HTTP+JSON / REST |
+
+### 10.4 企业中的 A2A 架构
+
+```mermaid
+graph TB
+    subgraph Org["企业内部"]
+        REG[(Agent 注册中心<br/>Agent Card 目录)]
+        A1[入职助手<br/>Python / LangGraph]
+        A2[报销审核<br/>Java / Spring AI Alibaba]
+        A3[IT 工单<br/>Go / ADK]
+        A1 -.发现.-> REG
+        A1 -->|A2A| A2
+        A1 -->|A2A| A3
+        A2 -->|MCP| T1[财务系统工具]
+        A3 -->|MCP| T2[工单系统工具]
+    end
+    A2 -->|A2A + 签名 Agent Card| EXT[外部供应商 Agent]
+```
+
+- **注册与发现**：内部建立 Agent Card 目录；Spring AI Alibaba 等框架支持用 Nacos 做 Agent 服务发现
+- **身份与授权**：Agent 之间的调用同样需要 OAuth 等鉴权，并且要能追溯"这次委托最初代表哪个用户"
+- **可观测**：跨 Agent 调用串联到同一条 trace，否则多 Agent 系统出问题时几乎无法排查
+
+> ⚠️ **注意**：A2A 解决的是"能连通"，不是"该不该连"。多 Agent 系统的复杂度和成本都显著高于单 Agent（[06 章第七节](./06-Agent工程化-从Loop到生产.md#七多-agent何时值得)）。**大多数企业场景，单 Agent + 好的 MCP 工具就够了**；A2A 主要用于跨团队、跨组织的边界。
+
+---
+
+## 十一、协议与相关概念的边界
 
 | 概念 | 解决什么 | 与 MCP 的关系 |
 |---|---|---|
@@ -319,9 +456,10 @@ graph LR
 | **OpenAPI** | 描述 HTTP API | 面向开发者；MCP 工具面向模型，需要重新设计粒度和描述 |
 | **Agent Skills** | 打包指令、脚本、资源，按需加载进上下文 | 互补：Skill 教 Agent **怎么做**，MCP 给 Agent **能做什么** |
 | **A2A** | Agent 与 Agent 之间协作 | 互补：MCP 是 Agent ↔ 工具，A2A 是 Agent ↔ Agent |
-| **AG-UI** | Agent 与前端 UI 之间的事件协议 | 互补：位于交互层 |
+| **AG-UI** | Agent 与前端之间的事件协议 | 互补：位于交互层（[04 章](./04-AI交互层-流式协议与生成式UI.md)） |
+| **AGENTS.md** | 写给编码 Agent 的项目说明 | 约定级标准，与 Skills 同属"给 Agent 的上下文" |
 
-> 🔭 **先锋视角**：企业知识沉淀的新形态是 **"Skills + MCP"**：把团队 SOP（如"线上故障排查流程"）写成 Skill，把它依赖的系统（日志、监控、发布）做成 MCP Server。Agent 加载 Skill 后就知道该按什么步骤、调用哪些工具。
+> 🔭 **先锋视角**：企业知识沉淀的新形态是 **"Skills + MCP"**：把团队 SOP（如"线上故障排查流程"）写成 Skill，把它依赖的系统（日志、监控、发布）做成 MCP Server。Agent 加载 Skill 后就知道该按什么步骤、调用哪些工具。再往上一层，各团队的专业 Agent 通过 A2A 互相委托。
 
 ---
 
@@ -329,12 +467,15 @@ graph LR
 
 - MCP 把集成复杂度从 N×M 降到 N+M；企业 Server 主要用 **Tools + Streamable HTTP**
 - `2026-07-28` 改为**无状态**：去掉握手和会话，引入 MRTR、`server/discover`、可缓存结果和 trace 传播，**更适合水平扩展和网关治理**
+- 官方 SDK 覆盖 Python、TS、Java、Go、C#，概念一致；Python v2 的 `FastMCP` 已更名为 `MCPServer`
 - 工具设计：**面向任务、精简返回、错误可自我修正、标注副作用**
 - 鉴权：Server 是 OAuth **资源服务器**，校验 audience，**不透传令牌**，以用户身份访问数据
 - 规模化后需要 **MCP 网关 + 注册中心**；牢记"致命三要素"
+- **对方是函数用 MCP，对方是"同事"用 A2A**；A2A 的核心是 Agent Card 与 Task 生命周期
 
 ## 练习
 
-1. 用 TS SDK v2 写一个"团队周报"MCP Server：提供 `list_my_commits`（只读）和 `submit_weekly_report`（写入，标注 `destructiveHint`），在 Claude Code 中通过 stdio 接入测试
+1. 用你最熟悉的语言写一个"团队周报"MCP Server：提供 `list_my_commits`（只读）和 `submit_weekly_report`（写入，标注 `destructiveHint`），在 Claude Code 中通过 stdio 接入测试；再用另一种语言实现同一个 Server，对比 SDK 设计差异
 2. 把第 1 题改为 Streamable HTTP 部署，加上 Bearer Token 校验（可先用 JWT 自签模拟 IdP），验证 audience 不匹配时返回 401
 3. 设计一个公司级 MCP 网关的数据模型：工具注册表、RBAC 策略、审计日志表分别需要哪些字段？
+4. 用 A2A 官方 SDK 实现两个不同语言的 Agent（如 Python 的"调研 Agent"与 TS 的"写作 Agent"），让写作 Agent 通过 A2A 委托调研任务，观察 Task 状态流转
