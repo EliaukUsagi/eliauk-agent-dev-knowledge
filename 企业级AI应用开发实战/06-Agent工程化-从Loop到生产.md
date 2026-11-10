@@ -350,7 +350,7 @@ graph TB
 
 > 📖 **Harness**：包裹在模型外面、让模型能可靠完成任务的全部工程设施——工具集、上下文管理、权限、沙箱、记忆、子 Agent、生命周期钩子。**Agent = 模型 + Harness**。
 
-Claude Code、Codex CLI、OpenCode、Cline 是目前**工程化最成熟**的 Harness，它们的设计可以直接迁移到企业 Agent：
+Claude Code、Codex CLI、OpenCode、Cline 是目前**工程化最成熟**的 Harness，它们的设计可以直接迁移到企业 Agent（各项设计的具体实现见 [12 章](./12-编码Agent-Harness深度拆解.md)）：
 
 | 设计 | 编码 Agent 中的做法 | 迁移到企业 Agent |
 |---|---|---|

@@ -93,14 +93,14 @@ S3 / MinIO       # 原始事件、大字段
 **Python（Langfuse SDK，装饰器方式）**：
 
 ```python
-from langfuse import observe, get_client
+from langfuse import observe, propagate_attributes
 
 @observe()   # 自动创建 span，记录输入输出与耗时；嵌套调用自动形成父子关系
 async def answer(question: str, user_id: str, chat_id: str) -> str:
-    get_client().update_current_trace(user_id=user_id, session_id=chat_id,
-                                      tags=["kb-chat"], release=APP_VERSION)
-    docs = await retrieve(question)          # retrieve 同样加 @observe()
-    return await generate(question, docs)    # 模型调用经集成自动记录为 Generation
+    # user_id / session_id 等关联属性需要落在每个 observation 上，用上下文管理器向下传播
+    with propagate_attributes(user_id=user_id, session_id=chat_id, tags=["kb-chat"], version=APP_VERSION):
+        docs = await retrieve(question)          # retrieve 同样加 @observe()
+        return await generate(question, docs)    # 模型调用经集成自动记录为 Generation
 ```
 
 **TypeScript（AI SDK 7 + OTel）**：
@@ -127,6 +127,135 @@ streamText({ model, messages, telemetry: { functionId: 'kb-chat', metadata: { us
 - **采样**：高流量下全量记录成本很高，可以按比例采样，但**报错和差评的请求要 100% 保留**
 - **版本标记**：每个 trace 带 `release` 和 prompt 版本，才能对比"改版前后"的效果
 - **访问控制**：trace 中有大量敏感内容，查看 trace 本身需要权限与审计
+
+### 2.6 Langfuse 深入（重点）
+
+> 版本基线：服务端 **v4**（2026 年 7 月 GA，v3 仍在并行维护）；Python 与 JS/TS SDK 都已**基于 OpenTelemetry** 重写（Python 自 v3、JS/TS 自 v4 起），主版本仍在快速演进，以 [SDK 文档](https://langfuse.com/docs/observability/sdk/overview)的升级指南为准。服务端 v3 → v4 对 ClickHouse、PostgreSQL、Redis 的最低版本有要求，升级前查看官方迁移指南。
+>
+> ⚠️ 新版 SDK 的两个行为变化：设置 trace 属性从 `update_current_trace()` 改为 `propagate_attributes()` 上下文管理器；**默认不再导出所有 OTel span**（HTTP、数据库等非 LLM span 需要显式配置才会上报）。
+
+#### 2.6.1 架构与写入路径
+
+```mermaid
+graph LR
+    SDK[应用<br/>Langfuse SDK / 任意 OTel SDK] -->|批量上报| WEB[langfuse-web<br/>UI + 公开 API + OTel 接收端]
+    WEB -->|① 原始事件整批写入| S3[(S3 / MinIO)]
+    WEB -->|② 只投递引用| RQ[(Redis 队列)]
+    RQ --> WK[langfuse-worker]
+    WK -->|③ 读回事件| S3
+    WK -->|④ 合并后批量写入| CH[(ClickHouse<br/>trace / observation / score)]
+    WEB -->|查询分析| CH
+    WEB --> PG[(PostgreSQL<br/>项目、用户、Prompt、评估器配置)]
+    WK -->|LLM-as-Judge、导出等异步任务| PG
+```
+
+这条写入路径的设计值得借鉴：
+
+| 设计 | 解决的问题 |
+|---|---|
+| **先落 S3，队列只放引用** | 流量突增时 Redis 不会被大字段撑爆；worker 挂掉后事件不丢，可以重新消费 |
+| **异步写 ClickHouse** | ClickHouse 擅长大批量写入、不擅长高频小写入，worker 负责攒批 |
+| **同一 observation 的多次更新在 worker 中合并** | SDK 可以先上报"开始"、再上报"结束和输出"，存储中只保留最终版本 |
+| **读写分离** | 配置类数据放 PostgreSQL（事务一致），明细放 ClickHouse（分析查询），各取所长 |
+
+> 🎯 **落地要点**：自研"高写入量 + 需要分析查询"的日志类系统（审计日志、Agent 轨迹存储）时，可以直接照搬"**对象存储缓冲 + 队列 + 列式库批量写入**"这一模式。
+
+#### 2.6.2 完整数据模型
+
+**Observation 类型**（2.1 节的 Span、Generation 只是其中两种）：
+
+| 类型 | 用途 | 是否携带模型用量与费用 |
+|---|---|---|
+| `span` | 通用步骤（默认类型） | — |
+| `generation` | LLM 调用 | ✅ |
+| `embedding` | Embedding 调用 | ✅ |
+| `event` | 瞬时事件（无持续时间） | — |
+| `agent` | Agent 的一次运行 | — |
+| `tool` | 工具调用 | — |
+| `chain` | 多个步骤组成的链 | — |
+| `retriever` | 检索步骤 | — |
+| `evaluator` | 评估步骤 | — |
+| `guardrail` | 护栏检查 | — |
+
+细分类型的价值在于：UI 能按类型渲染（如 Agent 的轨迹图），评估器可以只针对某类 observation 运行（如只评估 `retriever` 的召回质量）。
+
+**其他实体**：
+
+| 实体 | 说明 |
+|---|---|
+| **Session** | 把多个 trace 串成一次完整对话，用于回放多轮交互 |
+| **User** | 按 `user_id` 聚合用量、费用和反馈 |
+| **Score** | 四种数据类型：**数值、类别、布尔、文本**（文本用于开放式标注意见）；可挂在 trace、observation、session 或实验运行上 |
+| **Dataset / Item / Run** | 评测集、评测用例（输入 + 期望输出）、一次实验运行（每个用例的实际输出与分数） |
+| **Prompt** | 版本 + 标签（如 `production`），Generation 记录使用的 prompt 版本（见第四节） |
+
+#### 2.6.3 进阶接入
+
+```python
+from langfuse import Langfuse, get_client, observe, propagate_attributes
+
+def mask(data, **kwargs):                                   # 上报前脱敏：手机号、身份证号等
+    return redact_pii(data) if isinstance(data, str) else data
+
+Langfuse(mask=mask, sample_rate=0.2)                        # 初始化一次；按 20% 采样
+langfuse = get_client()
+
+@observe(as_type="retriever")                               # 声明 observation 类型
+async def retrieve(query: str) -> list[Doc]:
+    return await vector_store.search(query, top_k=8)
+
+@observe(as_type="agent")
+async def run_agent(question: str, user_id: str, chat_id: str) -> str:
+    with propagate_attributes(user_id=user_id, session_id=chat_id, version=APP_VERSION):
+        docs = await retrieve(question)
+        messages = build_messages(question, docs)
+        with langfuse.start_as_current_observation(as_type="generation", name="answer",
+                                                    model="qwen3-32b", input=messages) as gen:
+            resp = await llm.chat(messages)
+            gen.update(output=resp.text, usage_details={"input_tokens": resp.usage.prompt_tokens,
+                                                        "output_tokens": resp.usage.completion_tokens})
+        return resp.text
+
+# 用户点踩：把反馈作为 Score 写回对应 trace
+langfuse.create_score(trace_id=trace_id, name="user_feedback", value=0, data_type="BOOLEAN", comment=reason)
+```
+
+> ⚠️ **注意**：
+> - `mask` 作用于输入输出字段；新版 SDK 推荐用 `mask_otel_spans` 在 OTel 导出层统一脱敏，覆盖面更全
+> - 采样会丢弃部分 trace。如果要求"报错和差评 100% 保留"（2.5 节），需要在应用侧判断后再决定是否上报，或者不采样、改用数据保留策略控制存储量
+> - 已经用 OTel 埋点的框架（AI SDK、Spring AI 等）不需要再用 Langfuse SDK 重复埋点，直接把 OTel 数据导出到 Langfuse 的 OTel 端点即可；可通过 OTel 属性 `langfuse.observation.type` 指定 observation 类型
+
+#### 2.6.4 费用计算
+
+Langfuse 在**写入时**根据 Generation 上报的 `model` 和 token 用量，匹配**模型定义**（模型名正则 + 各类 token 的单价，支持阶梯定价）计算费用。主流厂商模型已内置定义。
+
+私有化部署的模型（如 vLLM 上的 Qwen）没有内置价格，需要在项目设置中**自定义模型定义**：可以按 GPU 成本折算出内部单价，这样私有模型和 API 模型的费用可以在同一张看板上对比。
+
+#### 2.6.5 评测能力
+
+与第三节的方法论对应：
+
+| 第三节的形态 | Langfuse 中的功能 |
+|---|---|
+| 离线评测 | **Dataset + Experiment**：在评测集上运行应用，对比不同 prompt / 模型的实验结果 |
+| 在线评测 | **LLM-as-a-Judge 评估器**：由 worker 异步对线上 observation 打分；官方推荐**按 observation 配置**（trace 级评估器已标记为旧版） |
+| 人工标注 | **Annotation Queue**：把需要审核的 trace 推入队列，分配给标注人员打分并填写期望输出 |
+| 用户反馈 | SDK / API 写入 Score |
+
+#### 2.6.6 许可边界与企业部署
+
+`ee/` 目录**之外**的代码是 MIT 许可，Tracing、评测、Prompt 管理、数据集、实验、标注队列等核心功能**全部免费且无用量限制**。`ee/` 目录中的企业功能需要许可证密钥：
+
+| 企业版功能 | 开源版的替代思路 |
+|---|---|
+| 项目级 RBAC | 按项目隔离 + 组织级角色 |
+| 受保护的 Prompt 标签（限制谁能改 `production`） | Prompt 放在代码仓库中走 PR 流程 |
+| 数据保留策略 | 自行配置 ClickHouse TTL 与 S3 生命周期（需要充分测试） |
+| 审计日志 | 在网关或反向代理层记录访问日志 |
+| **服务端脱敏** | 使用 SDK 的 `mask` 函数**在客户端脱敏** |
+| SCIM、组织管理 API | 手工或脚本管理成员 |
+
+> 🎯 **落地要点**：私有化部署时，**ClickHouse 是主要负载和存储**，要按 trace 量规划磁盘和内存；大字段（完整的 prompt 与回答）会让存储迅速膨胀，上线前就定好数据保留期限。
 
 ---
 
@@ -387,6 +516,7 @@ router_settings:
 
 - AI 应用"答错不报错"，必须建立 **Trace → 发现问题 → 沉淀用例 → 修改 → 评测回归 → 发布** 的闭环
 - **按 OTel GenAI 语义约定埋点**，与可观测平台解耦；Tracing 记录到 Generation 粒度，注意脱敏
+- Langfuse：写入路径"**S3 缓冲 + 队列 + worker 批量写 ClickHouse**"；Observation 细分 10 种类型，Score 支持四种数据类型；核心功能 MIT 免费，服务端脱敏、审计日志等属于企业版，开源部署时在 SDK 侧脱敏
 - 评测：**代码规则优先**，LLM-as-Judge 用二元判断并与人工校准；Agent 还要评过程；评测集按类别管理，放进 CI
 - **AI 网关**统一协议、密钥、路由降级、限流计费；优先纳入已有网关体系
 - 成本优化优先级：**模型分级 > Prompt Caching > 上下文控制 > Batch / 蒸馏**
@@ -396,3 +526,4 @@ router_settings:
 1. 用 docker compose 私有化部署 Langfuse 或 Phoenix，接入一个多步工具调用的 Agent，在 UI 中查看完整 trace；再把同一份 OTel 数据同时导出到另一个后端，验证埋点与平台解耦
 2. 为知识库问答构建 50 条评测集（含 10 条应拒答、5 条越权尝试），实现"代码规则 + LLM-as-Judge"两类评估器，并与人工打分对比一致率
 3. 部署 LiteLLM 或 Higress，配置两个渠道的负载均衡和一个降级模型，人为让主渠道失败，验证降级生效与 token 计量正确
+4. 在私有化部署的 Langfuse 中为 vLLM 上的模型添加自定义模型定义（按 GPU 成本折算单价），配置一个只针对 `retriever` 类型 observation 的 LLM-as-a-Judge 评估器，并建立标注队列，抽 30 条与评估器结果对比一致率

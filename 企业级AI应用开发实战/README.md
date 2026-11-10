@@ -6,7 +6,7 @@
 
 - **编写时间**：2026 年 11 月
 - **视角**：概念与标准优先，框架其次；每个主题给出 Python / TypeScript / Java / Go 等主流生态的对应方案
-- **版本基线**：MCP 规范 `2026-07-28`（官方 Python / TS SDK v2）、A2A v1.0、LangGraph 1.x、Microsoft Agent Framework 1.0、Google ADK 2.x、Spring AI 2.0、Vercel AI SDK 7
+- **版本基线**：MCP 规范 `2026-07-28`（官方 Python / TS SDK v2）、A2A v1.0、LangGraph 1.x、Microsoft Agent Framework 1.0、Google ADK 2.x、Spring AI 2.0、Vercel AI SDK 7、vLLM v0.3x（V1 引擎）、RAGFlow 1.0、Langfuse v4、Claude Code 2.1.x、Codex CLI 0.16x、OpenHands V1
 
 > ⚠️ AI 工程领域半年一个大版本。文中凡是涉及具体 API 的地方都标了版本；动手前先对照官方 changelog，**以官方文档为准**。
 
@@ -65,15 +65,16 @@ graph TB
 |---|---|---|---|
 | [01 全景地图与技术选型](./01-全景地图与技术选型.md) | 分层架构、项目分级、**多语言生态对照**、平台 vs 框架 vs 自研、2026 趋势 | ⭐⭐⭐ | 2 小时 |
 | [02 开源项目与生态图谱](./02-开源项目与生态图谱.md) | 17 个领域、近百个项目与标准的定位、技术栈与学习要点（查阅型） | ⭐⭐⭐ | 随查 |
-| [03 模型层：选型、私有化推理与微调](./03-模型层-选型私有化推理与微调.md) | 模型选型方法、vLLM/SGLang、显存估算、RAG vs 微调、LoRA/DPO/RFT | ⭐⭐ | 3 小时 |
+| [03 模型层：选型、私有化推理与微调](./03-模型层-选型私有化推理与微调.md) | 模型选型方法、显存估算、**vLLM 深入**（V1 架构、部署参数、并行与量化、监控压测、集群化）、RAG vs 微调、LoRA/DPO/RFT | ⭐⭐ | 4 小时 |
 | [04 AI 交互层：流式协议、生成式 UI 与人机协同](./04-AI交互层-流式协议与生成式UI.md) | SSE 与事件模型、AG-UI、AI SDK、A2UI / MCP Apps、审批交互、生产问题 | ⭐⭐⭐ | 4 小时 |
 | [05 MCP 与 Agent 互操作协议](./05-MCP与Agent互操作协议.md) | MCP 无状态新规范、多语言 SDK、OAuth、MCP 网关、A2A、协议全景 | ⭐⭐⭐ | 4 小时 |
 | [06 Agent 工程化：从 Loop 到生产](./06-Agent工程化-从Loop到生产.md) | Workflow vs Agent、五种模式、上下文工程、记忆、持久化执行、多 Agent、框架选型 | ⭐⭐⭐ | 4 小时 |
 | [07 企业级 RAG 落地](./07-企业级RAG落地.md) | 文档解析、切片、混合检索、**权限过滤**、引用溯源、多模态 RAG、评测 | ⭐⭐⭐ | 4 小时 |
-| [08 LLM 平台源码导读](./08-LLM平台源码导读.md) | Dify / FastGPT / Coze Studio / RAGFlow 架构拆解与借鉴点 | ⭐⭐ | 3 小时 + 读源码 |
-| [09 LLMOps：可观测、评测与 AI 网关](./09-LLMOps-可观测评测与AI网关.md) | OTel GenAI、Langfuse、评测体系、Prompt 管理、AI 网关、成本治理 | ⭐⭐⭐ | 3 小时 |
+| [08 LLM 平台源码导读](./08-LLM平台源码导读.md) | Dify / FastGPT / Coze Studio / RAGFlow（含 1.0 Go 架构、DeepDoc、入库流水线）架构拆解与借鉴点 | ⭐⭐ | 4 小时 + 读源码 |
+| [09 LLMOps：可观测、评测与 AI 网关](./09-LLMOps-可观测评测与AI网关.md) | OTel GenAI、**Langfuse 深入**（写入架构、数据模型、费用、评测、许可边界）、评测体系、Prompt 管理、AI 网关、成本治理 | ⭐⭐⭐ | 4 小时 |
 | [10 安全、权限与上线清单](./10-安全权限与上线清单.md) | OWASP LLM / Agentic Top 10、提示注入纵深防御、Agent 权限、沙箱、上线 Checklist | ⭐⭐⭐ | 3 小时 |
 | [11 实战项目方案](./11-实战项目方案.md) | 3 个企业级项目：多技术栈方案、里程碑、量化验收标准 | ⭐⭐⭐ | 每个 1~2 周 |
+| [12 编码 Agent Harness 深度拆解](./12-编码Agent-Harness深度拆解.md) | Claude Code / Codex CLI / OpenHands 的工具、上下文、权限、沙箱、Hooks / Skills / 子 Agent、运行形态，及基于 SDK 构建企业 Agent | ⭐⭐⭐ | 4 小时 + 读源码 |
 
 ---
 
@@ -85,6 +86,7 @@ graph LR
     P1 --> P4[04 交互层]
     P1 --> P6[06 Agent 工程]
     P6 --> P5[05 MCP/A2A]
+    P6 --> P12[12 编码 Agent<br/>Harness]
     P6 --> P7[07 企业 RAG]
     P4 & P5 & P7 --> P10[10 安全]
     P10 --> P9[09 LLMOps]
@@ -94,9 +96,10 @@ graph LR
 ```
 
 - **🚀 两周速成**：01 → 06 → 05 → 07 → 10 → 11（任选一个项目）
-- **📘 标准路径（一到两个月）**：按 01 → 11 顺序通读，02 作为工具书随时查阅，完成 11 中至少两个项目
+- **📘 标准路径（一到两个月）**：按 01 → 12 顺序通读（12 章建议紧接 06 章阅读），02 作为工具书随时查阅，完成 11 中至少两个项目
 - **🎯 目标导向**：
   - 给已有业务系统**加 AI 能力** → 04 → 05 → 06 → 10 → 11 项目二
+  - 做**编码 / 文件 / 数据类长任务 Agent** → 06 → 12 → 05 → 10
   - 做**企业知识库 / 智能客服** → 06 → 07 → 09 → 10 → 11 项目一
   - 做 **AI 中台 / 平台团队** → 01 → 03 → 08 → 09 → 10 → 11 项目三
   - 想**拓宽技术视野** → 01 → 02 → 03 → 05，再挑感兴趣的生态深入
