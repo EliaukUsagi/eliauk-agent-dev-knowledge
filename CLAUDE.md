@@ -9,7 +9,7 @@
 
 ## Git 提交
 
-- 远程：`origin` → https://github.com/EliaukRender/eliauk-agent-dev-knowledge.git ，分支 `main`。
+- 远程：`origin` → https://github.com/EliaukUsagi/eliauk-agent-dev-knowledge.git ，分支 `main`。
 - 提交身份必须使用个人 GitHub 账号（已写入仓库级 `.git/config`，不使用公司账号 `changliu35`）：
   - `user.name`：`EliaukRender`
   - `user.email`：`113354699+EliaukRender@users.noreply.github.com`
